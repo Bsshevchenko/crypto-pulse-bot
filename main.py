@@ -11,7 +11,9 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
+    BotCommand,
+    BotCommandScopeDefault
 )
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -33,9 +35,7 @@ LEXICON = {
         "lang_prompt": "Please choose your language:",
         "language_chosen": "✅ Language set to English.",
         "language_changed": "✅ Language changed to English.",
-        "start_user_prompt": (
-            "Use /menu to see all commands or pick language below:"
-        ),
+        "start_user_prompt": "Use /menu to see all commands or pick language below:",
         "start_chosen_lang_menu_msg": "Use the menu below to quickly access commands.",
         "unknown_command_before_lang": "You must choose your language first.",
 
@@ -73,9 +73,7 @@ LEXICON = {
         "lang_prompt": "Пожалуйста, выберите язык:",
         "language_chosen": "✅ Язык установлен на русский.",
         "language_changed": "✅ Язык изменён на русский.",
-        "start_user_prompt": (
-            "Используйте /menu для просмотра всех команд или выберите язык ниже:"
-        ),
+        "start_user_prompt": "Используйте /menu для просмотра всех команд или выберите язык ниже:",
         "start_chosen_lang_menu_msg": "Используйте меню ниже для быстрого доступа к командам.",
         "unknown_command_before_lang": "Сначала выберите язык!",
 
@@ -111,11 +109,37 @@ LEXICON = {
     }
 }
 
-# ---------------------- Состояние пользователя ----------------------
-user_lang = {}  # user_lang[user_id] = 'en'/'ru' (None => не выбран)
-user_coins = {}  # user_coins[user_id] = set(['bitcoin', 'ethereum', ...])
-user_pages = {}  # user_pages[user_id] = int (номер текущей страницы)
-top_100_cache = []  # Кэш top-100 монет
+# ---------------------- Состояния ----------------------
+user_lang = {}
+user_coins = {}
+user_pages = {}
+top_100_cache = []
+# Сохраняем ID сообщения «Choose up to 3 coins... + inline-кнопки»,
+# чтобы удалить именно его при подтверждении.
+temp_inline_msg = {}  # user_id -> message_id
+
+async def setup_bot_commands(bot: Bot):
+    """
+    Устанавливает команды, описание и короткое описание бота.
+    """
+    # Список команд (будет выводиться в меню при вводе "/")
+    commands = [
+        BotCommand(command="start", description="See start information"),
+        BotCommand(command="choice_coin", description="Select coins"),
+        BotCommand(command="price", description="Get crypto prices"),
+        BotCommand(command="menu", description="Show menu"),
+        BotCommand(command="change_lang", description="Change language")
+    ]
+
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
+    # Короткое описание (отображается вверху, где «What can this bot do?»)
+    await bot.set_my_short_description("Shows approximate creation date for any account")
+    # Основное описание (видно в профиле бота под кнопкой «What can this bot do?»)
+    await bot.set_my_description(
+        "This bot can show approximate creation date for any Telegram account."
+        "\nUse /id <user_id> or /help for more info."
+    )
 
 
 def get_menu_buttons(language: str) -> ReplyKeyboardMarkup:
@@ -124,8 +148,7 @@ def get_menu_buttons(language: str) -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text="/price"),
                 KeyboardButton(text="/choice_coin"),
-                KeyboardButton(text="/menu"),
-                KeyboardButton(text="/change_lang")  # Для смены языка
+                KeyboardButton(text="/change_lang")
             ]
         ],
         resize_keyboard=True
@@ -277,7 +300,6 @@ def user_language_chosen(func):
 # ---------------------- Обработчики команд ----------------------
 @dp.message(Command("start"))
 async def cmd_start(message: Message, **kwargs):
-    """Первый запуск: сбрасываем язык, предлагаем выбрать."""
     user_id = message.from_user.id
     user_lang[user_id] = None
 
@@ -286,8 +308,8 @@ async def cmd_start(message: Message, **kwargs):
     text_ru = LEXICON["ru"]["lang_prompt"]
     text_en = LEXICON["en"]["lang_prompt"]
 
-    # Сохраним сообщение с выбором языка в переменную:
-    msg = await message.answer(
+    # Сообщение с выбором языка
+    await message.answer(
         f"{text_ru}\n{text_en}",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -298,8 +320,7 @@ async def cmd_start(message: Message, **kwargs):
             ]
         )
     )
-
-    # Второе сообщение — подсказка, её НЕ удаляем
+    # Оставляем второе сообщение-подсказку
     await message.answer(
         LEXICON["ru"]["start_user_prompt"] + "\n" +
         LEXICON["en"]["start_user_prompt"]
@@ -315,7 +336,6 @@ async def cmd_menu(message: Message, **kwargs):
         LEXICON[lang]["menu_start"],
         LEXICON[lang]["menu_choice_coin"],
         LEXICON[lang]["menu_price"],
-        LEXICON[lang]["menu_userStats"],
         LEXICON[lang]["menu_menu"]
     ]
     await message.answer("\n".join(lines), reply_markup=get_menu_buttons(lang))
@@ -331,7 +351,15 @@ async def cmd_choice_coin(message: Message, **kwargs):
     user_pages[user_id] = 0
 
     keyboard = await coins_keyboard(page=0, selected_coins=set(), language=lang)
-    await message.answer(LEXICON[lang]["choose_coins_prompt"], reply_markup=keyboard)
+    # Сообщение с «Choose up to 3 coins...»
+    # + inline-клавиатура
+    msg_coins = await message.answer(
+        LEXICON[lang]["choose_coins_prompt"],
+        reply_markup=keyboard
+    )
+    # Сохраняем только это сообщение, чтобы удалить при нажатии «Подтвердить»
+    temp_inline_msg[user_id] = msg_coins.message_id
+
 
 
 @dp.message(Command("price"))
@@ -357,7 +385,7 @@ async def cmd_price(message: Message, **kwargs):
 @user_language_chosen
 async def cmd_user_stats(message: Message, **kwargs):
     lang = user_lang[message.from_user.id]
-    if str(message.from_user.id) not in ADMINS:
+    if str(message.from_user.id) in ADMINS:
         await message.reply(LEXICON[lang]["admin_denied"])
         return
 
@@ -369,11 +397,6 @@ async def cmd_user_stats(message: Message, **kwargs):
 @dp.message(Command("change_lang"))
 @user_language_chosen
 async def cmd_change_lang(message: Message, **kwargs):
-    """
-    Команда /change_lang: пользователь хочет сменить язык.
-    Показываем клавиатуру языков, но при выборе просто меняем язык
-    (без авто-генерации монет).
-    """
     user_id = message.from_user.id
     lang = user_lang[user_id]
 
@@ -393,40 +416,36 @@ async def cmd_change_lang(message: Message, **kwargs):
 @dp.callback_query(lambda c: c.data.startswith("lang_"))
 async def callback_set_language(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
-    previous_lang = user_lang.get(user_id)  # None => впервые
+    prev_lang = user_lang.get(user_id)
     chosen = callback.data.split("_")[1]
 
-    # Удаляем сообщение с выбором языка (и кнопки вместе с ним).
+    # Удаляем сообщение с выбором языка
     await callback.message.delete()
 
     user_lang[user_id] = chosen
     await set_language(user_id, chosen)
 
-    # Если язык был None, значит это первый запуск
-    if previous_lang is None:
+    # Если язык не был выбран — первый старт
+    if prev_lang is None:
         await callback.message.answer(LEXICON[chosen]["language_chosen"])
-        # Сразу панель выбора монет:
+        # Автоматически вызываем «choose_coins_prompt»
         user_coins[user_id] = set()
         user_pages[user_id] = 0
+
         keyboard = await coins_keyboard(page=0, selected_coins=set(), language=chosen)
-        await callback.message.answer(
+        msg_coins = await callback.message.answer(
             LEXICON[chosen]["choose_coins_prompt"],
             reply_markup=keyboard
         )
-        # И меню
-        await callback.message.answer(
-            LEXICON[chosen]["start_chosen_lang_menu_msg"],
-            reply_markup=get_menu_buttons(chosen)
-        )
+        temp_inline_msg[user_id] = msg_coins.message_id
     else:
-        # Это смена языка
+        # Язык меняем
         if chosen == 'en':
             msg = LEXICON['en']["language_changed"]
         else:
             msg = LEXICON['ru']["language_changed"]
         await callback.message.answer(msg, reply_markup=get_menu_buttons(chosen))
 
-    # Ответ, чтоб убрать «часики» на кнопке
     await callback.answer()
 
 
@@ -453,7 +472,6 @@ async def callback_select_coin(callback: CallbackQuery, **kwargs):
         selected_coins.add(coin_id)
 
     user_pages[user_id] = page
-
     keyboard = await coins_keyboard(
         page=page, selected_coins=selected_coins, language=lang
     )
@@ -468,7 +486,6 @@ async def callback_reset_selection(callback: CallbackQuery, **kwargs):
 
     user_coins[user_id] = set()
     page = user_pages.get(user_id, 0)
-
     keyboard = await coins_keyboard(page=page, selected_coins=set(), language=lang)
     await callback.message.edit_reply_markup(reply_markup=keyboard)
     await callback.answer(LEXICON[lang]["selection_cleared"])
@@ -501,20 +518,35 @@ async def callback_confirm_selection(callback: CallbackQuery, **kwargs):
         )
         return
 
+    # Удаляем полностью сообщение c inline-клавиатурой (choose_coins_prompt)
+    # Если оно есть
+    msg_id = temp_inline_msg.get(user_id)
+    if msg_id:
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+        # Чистим из словаря
+        del temp_inline_msg[user_id]
+
+    # Сохраняем выбор
     await set_user_coins(user_id, list(selected))
+
+    # Генерируем цену
     prices = await get_crypto_prices(selected)
     msg = build_price_message(prices, lang)
 
-    # Убираем инлайн-клавиатуру
-    await callback.message.edit_reply_markup(reply_markup=None)
+    # Отправляем сообщение с ценами
     await callback.message.answer(msg, reply_markup=get_menu_buttons(lang))
 
+    # Ответ для убирания "часиков" на кнопке
     await callback.answer(LEXICON[lang]["selection_confirmed"])
 
 
 # ---------------------- Запуск бота ----------------------
 async def main():
     print("🤖 Bot started!")
+    await setup_bot_commands(bot)
     await init_db()
     await dp.start_polling(bot)
 
