@@ -8,7 +8,8 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
-from database import init_db, add_user, set_language, set_user_coins
+from database import init_db, add_user, set_language, set_user_coins, count_users
+from constants.admins import ADMINS
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -17,9 +18,8 @@ dp = Dispatcher()
 
 user_coins = {}
 user_pages = {}
-
-
 top_100_cache = []
+
 
 async def get_top_100_coins():
     global top_100_cache
@@ -50,7 +50,7 @@ def build_price_message(data):
     for coin, values in data.items():
         emoji = "🔸"
         price = values.get('usd', 'N/A')
-        change = values.get('usd_24h_change', 0.0)  # Устанавливаем значение по умолчанию
+        change = values.get('usd_24h_change', 0.0)
         change_icon = "📈" if change >= 0 else "📉"
         message_parts.append(
             f"{emoji} <b>{coin.title()}</b>\n• ${price:,} | {change_icon} {change:.2f}% (24ч)\n"
@@ -60,22 +60,17 @@ def build_price_message(data):
     return '\n'.join(message_parts)
 
 
-
 async def coins_keyboard(page=0, per_page=15, selected_coins=None):
     if selected_coins is None:
         selected_coins = set()
 
     coins_data = await get_top_100_coins()
-
     total_coins = len(coins_data)
     total_pages = (total_coins - 1) // per_page
-
-    # Корректное ограничение страницы
     page = max(0, min(page, total_pages))
 
     start = page * per_page
     end = min(start + per_page, total_coins)
-
     keyboard_buttons = []
     row = []
 
@@ -93,7 +88,6 @@ async def coins_keyboard(page=0, per_page=15, selected_coins=None):
     if row:
         keyboard_buttons.append(row)
 
-    # Чёткая логика навигации по страницам
     navigation_buttons = []
     if page > 0:
         navigation_buttons.append(InlineKeyboardButton(text="← Назад", callback_data=f"page_{page - 1}"))
@@ -101,6 +95,11 @@ async def coins_keyboard(page=0, per_page=15, selected_coins=None):
         navigation_buttons.append(InlineKeyboardButton(text="Вперед →", callback_data=f"page_{page + 1}"))
     if navigation_buttons:
         keyboard_buttons.append(navigation_buttons)
+
+    if selected_coins:
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="🔄 Сбросить выбор", callback_data="reset_selection")
+        ])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
@@ -115,6 +114,15 @@ async def cmd_start(message: Message):
     ])
 
     await message.answer("Please, choose your language:\nПожалуйста, выберите язык:", reply_markup=keyboard)
+
+
+@dp.message(Command("userStats"))
+async def cmd_user_stats(message: Message):
+    if str(message.from_user.id) in ADMINS:
+        await message.reply("🚫 Доступ запрещён")
+        return
+    count = await count_users()
+    await message.answer(f"📊 Количество пользователей бота: <b>{count}</b>")
 
 
 @dp.callback_query(lambda c: c.data.startswith('lang_'))
@@ -159,6 +167,16 @@ async def set_coins(callback: CallbackQuery):
         await callback.message.answer(msg)
 
     await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == 'reset_selection')
+async def reset_selection(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_coins[user_id] = set()
+    page = user_pages.get(user_id, 0)
+    keyboard = await coins_keyboard(page=page, selected_coins=set())
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+    await callback.answer("Выбор сброшен")
 
 
 @dp.callback_query(lambda c: c.data.startswith('page_'))
