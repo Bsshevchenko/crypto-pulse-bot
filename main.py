@@ -1,8 +1,9 @@
 import os
+import time
+import uuid
 import asyncio
 import aiohttp
 from datetime import datetime
-import time
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -21,11 +22,20 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 # Ваши внутренние модули
-from database import init_db, add_user, set_user_coins, set_language, count_users
+from database import init_db, add_user, set_user_coins, set_language, count_users, set_user_premium, is_user_premium
 from constants.admins import ADMINS
+
+from yookassa import Configuration, Payment
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+PAYMASTER_TEST_TOKEN = os.getenv("PAYMASTER_TEST_TOKEN")
+
+# Настройки ЮKassa
+SHOP_ID = os.getenv("SHOP_ID")
+YOOKASSA_API_KEY = os.getenv("YOOKASSA_API_KEY")
+Configuration.account_id = SHOP_ID
+Configuration.secret_key = YOOKASSA_API_KEY
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -65,6 +75,7 @@ LEXICON = {
         "menu_userStats": "/userStats - User statistics (admin only)",
         "menu_menu": "/menu - Show this menu",
         "menu_change_interval": "/change_interval - Choosing the notification interval",
+        "menu_buy_premium": "/buy_premium - Upgrade to Premium",
 
         "admin_denied": "🚫 Access denied",
         "userStats_count": "📊 Number of bot users: <b>{count}</b>",
@@ -80,7 +91,15 @@ LEXICON = {
         "notify_24h": "Every 24 hours",
         "notify_set": "✅ Notification interval is set!",
         "no_coins_for_notify": "You haven't chosen any coins yet, so notifications are off.",
-        "notify_price_now": "Current prices for your selected coins (one-time)."
+        "notify_price_now": "Current prices for your selected coins (one-time).",
+
+        # Премиум
+        "premium_prompt": "💎 Buy Premium access to choose up to 10 coins!",
+        "premium_buy": "Pay for Premium",
+        "premium_paid": "✅ I have paid",
+        "premium_user": "✨ You are already a Premium user!",
+        "premium_congratulations": "🎉 Congratulations! Premium access is activated!",
+        "premium_error": "❌ Payment has not been confirmed. Please repeat later.",
     },
     "ru": {
         "lang_prompt": "Пожалуйста, выберите язык:",
@@ -115,6 +134,7 @@ LEXICON = {
         "menu_userStats": "/userStats - Статистика пользователей (только для админов)",
         "menu_menu": "/menu - Показать это меню",
         "menu_change_interval": "/change_interval - Выбор интервала уведомлений",
+        "menu_buy_premium": "/buy_premium - Купить Premium-доступ",
 
         "admin_denied": "🚫 Доступ запрещён",
         "userStats_count": "📊 Количество пользователей бота: <b>{count}</b>",
@@ -130,9 +150,21 @@ LEXICON = {
         "notify_24h": "Каждые 24 часа",
         "notify_set": "✅ Интервал уведомлений установлен!",
         "no_coins_for_notify": "У вас ещё не выбраны монеты, поэтому уведомления отключены.",
-        "notify_price_now": "Текущая цена по выбранным монетам (одноразово)."
+        "notify_price_now": "Текущая цена по выбранным монетам (одноразово).",
+
+        # Премиум
+        "premium_prompt": "💎 Купите Premium-доступ, чтобы выбирать до 10 монет!",
+        "premium_buy": "Оплатить Premium",
+        "premium_paid": "✅ Я оплатил",
+        "premium_user": "✨ Вы уже являетесь Premium-пользователем!",
+        "premium_congratulations": "🎉 Поздравляем! Premium доступ активирован!",
+        "premium_error": "❌ Оплата не подтверждена. Пожалуйста, повторите позже.",
+
     }
 }
+# ----------------------- Константы ---------------------------------
+MAX_COINS_STANDARD = 3
+MAX_COINS_PREMIUM = 10
 
 # ------------------------ Глобальные словари ------------------------
 user_lang = {}              # user_id -> 'en'/'ru'
@@ -150,8 +182,6 @@ user_next_notify = {}       # user_id -> float (timestamp)
 temp_coin_msg = {}          # user_id -> message_id (сообщение "Выберите монеты...")
 temp_interval_msg = {}      # user_id -> message_id (сообщение "Выберите интервал...")
 
-import time
-
 async def setup_bot_commands(bot: Bot):
     commands = [
         BotCommand(command="start", description="See start information"),
@@ -159,7 +189,8 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="price", description="Get crypto prices"),
         BotCommand(command="menu", description="Show menu"),
         BotCommand(command="change_lang", description="Change language"),
-        BotCommand(command="change_interval", description="Change interval notification")
+        BotCommand(command="change_interval", description="Change interval notification"),
+        BotCommand(command="buy_premium", description="Upgrade to premium")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
@@ -169,8 +200,8 @@ def get_menu_buttons(language: str) -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text="/price"),
                 KeyboardButton(text="/choice_coin"),
-                KeyboardButton(text="/change_lang"),
-                KeyboardButton(text="/change_interval")
+                # KeyboardButton(text="/change_lang"),
+                # KeyboardButton(text="/change_interval")
             ]
         ],
         resize_keyboard=True
@@ -479,23 +510,36 @@ async def callback_set_language(callback: CallbackQuery, **kwargs):
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("coin_"))
+@user_language_chosen
 async def callback_select_coin(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
-    lang = user_lang.get(user_id, "ru")
+    lang = user_lang[user_id]
     parts = callback.data.split("_", 2)
     coin_id = parts[1]
     page = int(parts[2]) if len(parts) > 2 else 0
 
+    premium = await is_user_premium(user_id)
+    max_coins = MAX_COINS_PREMIUM if premium else MAX_COINS_STANDARD
+
     selected_coins = user_coins.setdefault(user_id, set())
+
     if coin_id in selected_coins:
         selected_coins.remove(coin_id)
     else:
-        if len(selected_coins) >= 3:
-            await callback.answer(
-                LEXICON[lang]["max_3_coins"],
-                show_alert=True
-            )
-            return
+        if len(selected_coins) >= max_coins:
+            if lang == "ru":
+                await callback.answer(
+                    f"⚠️ Можно выбрать максимум {max_coins} монет!",
+                    show_alert=True
+                )
+                return
+            elif lang == "en":
+                await callback.answer(
+                    f"⚠️ You can select a maximum of {max_coins} coins!",
+                    show_alert=True
+                )
+                return
+
         selected_coins.add(coin_id)
 
     user_pages[user_id] = page
@@ -633,6 +677,53 @@ async def schedule_notifications():
                     await bot.send_message(uid, msg_price)
                 user_next_notify[uid] = now + interval
 
+# ------------------------ /buy_premium ------------------------
+@dp.message(Command("buy_premium"))
+@user_language_chosen
+async def cmd_buy_premium(message: Message, **kwargs):
+    user_id = message.from_user.id
+    lang = user_lang[user_id]
+
+    if await is_user_premium(user_id):
+        await message.answer(LEXICON[lang]["premium_user"])
+        return
+
+    payment = Payment.create({
+        "amount": {"value": "100.00", "currency": "RUB"},
+        "confirmation": {"type": "redirect", "return_url": "https://t.me/YourBotUsername"},
+        "capture": True,
+        "description": f"Premium-доступ для пользователя {user_id}"
+    })
+
+    payment_id = payment.id
+    payment_url = payment.confirmation.confirmation_url
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=LEXICON[lang]["premium_buy"], url=payment_url)],
+        [InlineKeyboardButton(text=LEXICON[lang]["premium_paid"], callback_data=f"check_payment_{payment_id}")]
+    ])
+
+    await message.answer(LEXICON[lang]["premium_prompt"], reply_markup=keyboard)
+
+# ------------------------ Проверка оплаты ------------------------
+async def verify_payment(payment_id: str):
+    payment = Payment.find_one(payment_id)
+    return payment.status == "succeeded"
+
+@dp.callback_query(lambda c: c.data.startswith("check_payment_"))
+@user_language_chosen
+async def callback_check_payment(callback: CallbackQuery, **kwargs):
+    user_id = callback.from_user.id
+    lang = user_lang[user_id]
+    payment_id = callback.data.split("_")[2]
+
+    if await verify_payment(payment_id):
+        await set_user_premium(user_id)
+        await callback.message.edit_text(LEXICON[lang]["premium_congratulations"])
+    else:
+        await callback.answer(LEXICON[lang]["premium_error"], show_alert=True)
+
+
 # ------------------------ Запуск бота ------------------------
 async def main():
     print("🤖 Bot started!")
@@ -643,3 +734,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

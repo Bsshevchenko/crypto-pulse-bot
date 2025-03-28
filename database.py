@@ -11,11 +11,12 @@ async def init_db():
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 language TEXT DEFAULT 'en',
-                coins TEXT DEFAULT '["bitcoin", "ethereum", "solana"]'
+                coins TEXT DEFAULT '["bitcoin", "ethereum", "solana"]',
+                premium BOOLEAN DEFAULT FALSE,
+                notify_interval INTEGER DEFAULT 0
             )
         ''')
         await db.commit()
-
 
 async def add_user(user_id: int, username: str):
     async with aiosqlite.connect(DATABASE) as db:
@@ -25,7 +26,6 @@ async def add_user(user_id: int, username: str):
         )
         await db.commit()
 
-
 async def set_language(user_id: int, language: str):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute(
@@ -33,7 +33,6 @@ async def set_language(user_id: int, language: str):
             (language, user_id)
         )
         await db.commit()
-
 
 async def get_language(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
@@ -43,13 +42,11 @@ async def get_language(user_id: int):
         result = await cursor.fetchone()
         return result[0] if result else 'en'
 
-
 async def count_users():
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("SELECT COUNT(*) FROM users")
         (count,) = await cursor.fetchone()
         return count
-
 
 async def set_notify_interval(user_id: int, interval: int):
     async with aiosqlite.connect(DATABASE) as db:
@@ -82,3 +79,14 @@ async def get_user_coins(user_id: int):
         )
         result = await cursor.fetchone()
         return json.loads(result[0]) if result else ["bitcoin", "ethereum", "solana"]
+
+async def set_user_premium(user_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("UPDATE users SET premium = TRUE WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+async def is_user_premium(user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT premium FROM users WHERE user_id = ?", (user_id,))
+        premium = await cursor.fetchone()
+        return premium[0] if premium else False
