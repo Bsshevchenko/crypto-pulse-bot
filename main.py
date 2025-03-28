@@ -146,6 +146,10 @@ user_first_interval = {}    # user_id -> bool (впервые ли пользо�
 user_intervals = {}         # user_id -> seconds
 user_next_notify = {}       # user_id -> float (timestamp)
 
+# Дополнительные словари для хранения message_id сообщений, которые нужно удалять
+temp_coin_msg = {}          # user_id -> message_id (сообщение "Выберите монеты...")
+temp_interval_msg = {}      # user_id -> message_id (сообщение "Выберите интервал...")
+
 import time
 
 async def setup_bot_commands(bot: Bot):
@@ -278,7 +282,6 @@ async def coins_keyboard(page=0, per_page=15, selected_coins=None, language="ru"
     if nav_row:
         kb_buttons.append(nav_row)
 
-    # Кнопки «Сбросить» / «Подтвердить»
     if selected_coins:
         reset_btn = InlineKeyboardButton(
             text=LEXICON[language]["reset_selection"],
@@ -326,9 +329,7 @@ def user_language_chosen(func):
 async def cmd_start(message: Message, **kwargs):
     user_id = message.from_user.id
     user_lang[user_id] = None
-    # Первый запуск
     user_first_time[user_id] = True
-    # До выбора интервала — False
     user_first_interval[user_id] = False
 
     await add_user(user_id, message.from_user.username)
@@ -371,22 +372,25 @@ async def cmd_choice_coin(message: Message, **kwargs):
     Каждый новый вызов /choice_coin:
     - сбрасываем выбранные монеты,
     - предлагаем выбрать,
-    - после подтверждения сразу показываем цену (без интервала).
+    - сохраняем message_id в temp_coin_msg,
+    - после подтверждения удаляем это сообщение.
     """
     user_id = message.from_user.id
     lang = user_lang[user_id]
 
-    # Раз не start — не первый запуск
     user_first_time[user_id] = False
 
     user_coins[user_id] = set()
     user_pages[user_id] = 0
 
     keyboard = await coins_keyboard(page=0, selected_coins=set(), language=lang)
-    await message.answer(
+    # Отправляем сообщение «Выберите монеты...»
+    msg = await message.answer(
         LEXICON[lang]["choose_coins_prompt"],
         reply_markup=keyboard
     )
+    # Запоминаем, чтобы удалить позже
+    temp_coin_msg[user_id] = msg.message_id
 
 @dp.message(Command("price"))
 @user_language_chosen
@@ -437,55 +441,47 @@ async def cmd_change_lang(message: Message, **kwargs):
 async def cmd_change_interval(message: Message, **kwargs):
     """
     Смена интервала уведомлений вручную.
+    Храним message_id в temp_interval_msg, чтобы удалить при выборе.
     """
     user_id = message.from_user.id
     lang = user_lang[user_id]
 
-    # Уже не «первый» выбор интервала
     user_first_interval[user_id] = False
-
     kb = interval_keyboard(lang)
-    await message.answer(
+    msg = await message.answer(
         LEXICON[lang]["notify_interval_prompt"],
         reply_markup=kb
     )
+    temp_interval_msg[user_id] = msg.message_id
 
 # ------------------------ Обработчики колбэков ------------------------
 @dp.callback_query(lambda c: c.data.startswith("lang_"))
 async def callback_set_language(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
     chosen = callback.data.split("_")[1]
-
-    # Удаляем сообщение с кнопками языка
     await callback.message.delete()
-
     user_lang[user_id] = chosen
     await set_language(user_id, chosen)
-
     if user_first_time[user_id]:
-        # Выбор языка впервые
         await callback.message.answer(LEXICON[chosen]["language_chosen"])
-
         user_coins[user_id] = set()
         user_pages[user_id] = 0
         keyboard = await coins_keyboard(page=0, selected_coins=set(), language=chosen)
-        await callback.message.answer(
+        msg = await callback.message.answer(
             LEXICON[chosen]["choose_coins_prompt"],
             reply_markup=keyboard
         )
+        temp_coin_msg[user_id] = msg.message_id
     else:
-        # Язык меняется по ходу
         msg = (LEXICON['en']["language_changed"]
                if chosen == 'en' else LEXICON['ru']["language_changed"])
         await callback.message.answer(msg, reply_markup=get_menu_buttons(chosen))
-
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("coin_"))
 async def callback_select_coin(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
     lang = user_lang.get(user_id, "ru")
-
     parts = callback.data.split("_", 2)
     coin_id = parts[1]
     page = int(parts[2]) if len(parts) > 2 else 0
@@ -503,7 +499,6 @@ async def callback_select_coin(callback: CallbackQuery, **kwargs):
         selected_coins.add(coin_id)
 
     user_pages[user_id] = page
-
     keyboard = await coins_keyboard(page=page, selected_coins=selected_coins, language=lang)
     await callback.message.edit_reply_markup(reply_markup=keyboard)
     await callback.answer()
@@ -512,7 +507,6 @@ async def callback_select_coin(callback: CallbackQuery, **kwargs):
 async def callback_reset_selection(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
     lang = user_lang.get(user_id, "ru")
-
     user_coins[user_id] = set()
     page = user_pages.get(user_id, 0)
     keyboard = await coins_keyboard(page=page, selected_coins=set(), language=lang)
@@ -523,10 +517,8 @@ async def callback_reset_selection(callback: CallbackQuery, **kwargs):
 async def callback_paginate_coins(callback: CallbackQuery, **kwargs):
     user_id = callback.from_user.id
     lang = user_lang.get(user_id, "ru")
-
     page = int(callback.data.split("_")[1])
     user_pages[user_id] = page
-
     selected = user_coins.get(user_id, set())
     keyboard = await coins_keyboard(page=page, selected_coins=selected, language=lang)
     await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -535,12 +527,13 @@ async def callback_paginate_coins(callback: CallbackQuery, **kwargs):
 @dp.callback_query(lambda c: c.data == "confirm_selection")
 async def callback_confirm_selection(callback: CallbackQuery, **kwargs):
     """
-    Пользователь подтвердил выбор монет.
+    Пользователь подтвердил выбор монет:
+    - удаляем сообщение с текстом «Выберите монеты...»
+    - генерируем/выводим цену или предлагаем интервал (при первом запуске)
     """
     user_id = callback.from_user.id
     lang = user_lang.get(user_id, "ru")
     selected = user_coins.get(user_id, set())
-
     if not selected:
         await callback.answer(
             LEXICON[lang]["must_select_at_least_one"],
@@ -548,74 +541,76 @@ async def callback_confirm_selection(callback: CallbackQuery, **kwargs):
         )
         return
 
-    # Убираем inline-кнопки
+    # Убираем inline-клавиатуру
     await callback.message.edit_reply_markup(reply_markup=None)
 
-    # Сохраняем монеты
+    # Удаляем сообщение "Выберите монеты...", если оно есть
+    if user_id in temp_coin_msg:
+        try:
+            await bot.delete_message(callback.message.chat.id, temp_coin_msg[user_id])
+        except Exception:
+            pass
+        del temp_coin_msg[user_id]
+
+    # Сохраняем выбор монет
     await set_user_coins(user_id, list(selected))
 
     if user_first_time.get(user_id, False):
-        # Первый запуск: теперь предлагаем выбрать интервал
         user_first_time[user_id] = False
-        user_first_interval[user_id] = True  # Запомним, что интервал выбирается впервые
-
+        user_first_interval[user_id] = True
         await callback.message.answer(LEXICON[lang]["selection_confirmed"])
         kb = interval_keyboard(lang)
-        await callback.message.answer(
+        # Отправляем сообщение "Выберите интервал..."
+        msg_interval = await callback.message.answer(
             LEXICON[lang]["notify_interval_prompt"],
             reply_markup=kb
         )
+        temp_interval_msg[user_id] = msg_interval.message_id
     else:
-        # Все последующие разы:
-        # Сразу генерируем и показываем цену
         data = await get_crypto_prices(selected)
         msg_price = build_price_message(data, lang)
-
         await callback.message.answer(LEXICON[lang]["selection_confirmed"])
         await callback.message.answer(msg_price, reply_markup=get_menu_buttons(lang))
-
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("interval_"))
 async def callback_select_interval(callback: CallbackQuery, **kwargs):
     """
-    Пользователь выбрал интервал.
-    Если это первое выставление интервала, то отправляем цену.
-    Если это смена интервала (после /change_interval), НИЧЕГО не отправляем.
+    Пользователь выбрал интервал:
+    - удаляем сообщение «Выберите интервал...»
+    - если первый раз, отправляем цены
     """
     user_id = callback.from_user.id
     lang = user_lang.get(user_id, "ru")
-
-    # Убираем inline-клавиатуру
     await callback.message.edit_reply_markup(reply_markup=None)
+
+    # Удаляем сообщение "Выберите интервал...", если есть
+    if user_id in temp_interval_msg:
+        try:
+            await bot.delete_message(callback.message.chat.id, temp_interval_msg[user_id])
+        except Exception:
+            pass
+        del temp_interval_msg[user_id]
 
     parts = callback.data.split("_", 1)
     interval_seconds = int(parts[1])
-
     user_intervals[user_id] = interval_seconds
     user_next_notify[user_id] = time.time() + interval_seconds
 
-    # Сообщаем, что интервал установлен
     await callback.message.answer(
         LEXICON[lang]["notify_set"],
         reply_markup=get_menu_buttons(lang)
     )
 
-    # Если это ПЕРВЫЙ раз пользователь выставляет интервал => отправляем разово цены
     if user_first_interval.get(user_id, False):
-        user_first_interval[user_id] = False  # Сбрасываем флаг
+        user_first_interval[user_id] = False
         selected = user_coins.get(user_id, set())
         if selected:
             data = await get_crypto_prices(selected)
             msg_price = build_price_message(data, lang)
-            text = f"{msg_price}"
-            await callback.message.answer(text)
+            await callback.message.answer(msg_price)
         else:
             await callback.message.answer(LEXICON[lang]["no_coins_for_notify"])
-
-    # Если это не первый раз — значит пользователь вызвал /change_interval,
-    # и мы не отправляем разово цены.
-
     await callback.answer()
 
 # ------------------------ Фоновая задача с уведомлениями ------------------------
@@ -630,14 +625,12 @@ async def schedule_notifications():
             if now >= nxt:
                 selected = user_coins.get(uid)
                 lang = user_lang.get(uid, "en")
-
                 if not selected:
                     await bot.send_message(uid, LEXICON[lang]["no_coins_for_notify"])
                 else:
                     data = await get_crypto_prices(selected)
                     msg_price = build_price_message(data, lang)
                     await bot.send_message(uid, msg_price)
-
                 user_next_notify[uid] = now + interval
 
 # ------------------------ Запуск бота ------------------------
@@ -645,9 +638,7 @@ async def main():
     print("🤖 Bot started!")
     await setup_bot_commands(bot)
     await init_db()
-
     asyncio.create_task(schedule_notifications())
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
