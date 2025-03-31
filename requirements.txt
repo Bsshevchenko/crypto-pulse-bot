@@ -1,4 +1,6 @@
 dotenv==0.9.9
 aiogram==3.19.0
+aiohttp
+PyYAML==6.0.2
 aiosqlite==0.21.0
 yookassa==3.5.0

@@ -1,7 +1,7 @@
 import aiosqlite
 import json
 
-DATABASE = "bot.db"
+DATABASE = "data/bot.db"
 
 
 async def init_db():
@@ -13,18 +13,25 @@ async def init_db():
                 language TEXT DEFAULT 'en',
                 coins TEXT DEFAULT '["bitcoin", "ethereum", "solana"]',
                 premium BOOLEAN DEFAULT FALSE,
-                notify_interval INTEGER DEFAULT 0
+                notify_interval INTEGER DEFAULT 0,
+                referrer_id INTEGER
             )
         ''')
         await db.commit()
 
-async def add_user(user_id: int, username: str):
+async def add_user(user_id: int, username: str, referrer_id: int = None):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
-            (user_id, username)
+            "INSERT OR IGNORE INTO users (user_id, username, referrer_id) VALUES (?, ?, ?)",
+            (user_id, username, referrer_id)
         )
         await db.commit()
+
+async def get_referrer_id(user_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return row[0] if row and row[0] else None
 
 async def set_language(user_id: int, language: str):
     async with aiosqlite.connect(DATABASE) as db:
