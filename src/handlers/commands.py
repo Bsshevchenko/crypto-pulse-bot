@@ -163,10 +163,10 @@ async def cmd_change_interval(message: Message):
     temp_interval_msg[user_id] = msg.message_id
 
 
-@router.message(Command("buy_premium"))
+@router.message(Command("get_premium"))
 @user_language_chosen
 async def cmd_buy_premium(message: Message):
-    """Команда /buy_premium — покупка премиум-доступа через ЮKassa"""
+    """Команда /get_premium — покупка премиум-доступа через ЮKassa"""
     user_id = message.from_user.id
     lang = user_lang[user_id]
 

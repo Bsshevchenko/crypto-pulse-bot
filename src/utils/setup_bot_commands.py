@@ -12,6 +12,6 @@ async def setup_bot_commands(bot: Bot):
         BotCommand(command="menu", description="Show menu"),
         BotCommand(command="change_lang", description="Change language"),
         BotCommand(command="change_interval", description="Change interval notification"),
-        BotCommand(command="buy_premium", description="Upgrade to premium")
+        BotCommand(command="get_premium", description="Upgrade to premium")
     ]
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
